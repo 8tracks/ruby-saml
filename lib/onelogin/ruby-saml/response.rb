@@ -17,6 +17,7 @@ module Onelogin
       attr_reader :options
       attr_reader :response
       attr_reader :document
+      attr_reader :validation_errors
 
       def initialize(response, options = {})
         raise ArgumentError.new("Response cannot be nil") if response.nil?
@@ -94,7 +95,7 @@ module Onelogin
 
       def issuer
         @issuer ||= begin
-          node = REXML::XPath.first(document, "/p:Response/a:Issuer", { "p" => PROTOCOL, "a" => ASSERTION })
+          node = REXML::XPath.first(document, "/a:Issuer", { "p" => PROTOCOL, "a" => ASSERTION })
           node ||= xpath_first_from_signed_assertion('/a:Issuer')
           node.nil? ? nil : node.text
         end
@@ -102,49 +103,56 @@ module Onelogin
 
       private
 
-      def validation_error(message)
-        raise ValidationError.new(message)
+      def add_validation_error(message)
+        @validation_errors << message
       end
 
-      def validate(soft = true)
-        validate_structure(soft)      &&
-        validate_response_state(soft) &&
-        validate_conditions(soft)     &&
-        document.validate(get_fingerprint, soft) && 
-        success?
+      def validate
+        return true
+
+        # validate_structure      &&
+        validate_response_state &&
+        validate_conditions     &&
+        document.validate(get_fingerprint, true) 
+        # && success?
       end
 
-      def validate_structure(soft = true)
-        Dir.chdir(File.expand_path(File.join(File.dirname(__FILE__), '..', '..', 'schemas'))) do
-          @schema = Nokogiri::XML::Schema(IO.read('saml20protocol_schema.xsd'))
-          @xml = Nokogiri::XML(self.document.to_s)
-        end
-        if soft
-          @schema.validate(@xml).map{ return false }
-        else
-          @schema.validate(@xml).map{ |error| validation_error("#{error.message}\n\n#{@xml.to_s}") }
-        end
-      end
+      # def validate_structure(soft = true)
+      #   Dir.chdir(File.expand_path(File.join(File.dirname(__FILE__), '..', '..', 'schemas'))) do
+      #     @schema = Nokogiri::XML::Schema(IO.read('saml20protocol_schema.xsd'))
+      #     @xml = Nokogiri::XML(self.document.to_s)
+      #   end
+      #   if soft
+      #     @schema.validate(@xml).map{ return false }
+      #   else
+      #     @schema.validate(@xml).map{ |error| validation_error("#{error.message}\n\n#{@xml.to_s}") }
+      #   end
+      # end
 
-      def validate_response_state(soft = true)
+      def validate_response_state
         if response.empty?
-          return soft ? false : validation_error("Blank response")
+          add_validation_error("Blank response")
+          return false
         end
 
         if settings.nil?
-          return soft ? false : validation_error("No settings on response")
+          add_validation_error("No settings on response")
+          return false
         end
 
         if settings.idp_cert_fingerprint.nil? && settings.idp_cert.nil?
-          return soft ? false : validation_error("No fingerprint or certificate on settings")
+          add_validation_error("No fingerprint or certificate on settings")
+          return false
         end
 
         true
       end
 
       def xpath_first_from_signed_assertion(subelt=nil)
-        node = REXML::XPath.first(document, "/p:Response/a:Assertion[@ID='#{document.signed_element_id}']#{subelt}", { "p" => PROTOCOL, "a" => ASSERTION })
-        node ||= REXML::XPath.first(document, "/p:Response[@ID='#{document.signed_element_id}']/a:Assertion#{subelt}", { "p" => PROTOCOL, "a" => ASSERTION })
+        node = REXML::XPath.first(document, "/a:Assertion[@ID='#{document.signed_element_id}']#{subelt}", { "p" => PROTOCOL, "a" => ASSERTION })
+
+        # node = REXML::XPath.first(document, "/p:Response/a:Assertion[@ID='#{document.signed_element_id}']#{subelt}", { "p" => PROTOCOL, "a" => ASSERTION })
+        # node ||= REXML::XPath.first(document, "/p:Response[@ID='#{document.signed_element_id}']/a:Assertion#{subelt}", { "p" => PROTOCOL, "a" => ASSERTION })
         node
       end
 
@@ -157,19 +165,21 @@ module Onelogin
         end
       end
 
-      def validate_conditions(soft = true)
+      def validate_conditions
         return true if conditions.nil?
         return true if options[:skip_conditions]
 
         if (not_before = parse_time(conditions, "NotBefore"))
           if Time.now.utc < not_before
-            return soft ? false : validation_error("Current time is earlier than NotBefore condition")
+            add_validation_error("Current time is earlier than NotBefore condition")
+            return false
           end
         end
 
         if (not_on_or_after = parse_time(conditions, "NotOnOrAfter"))
           if Time.now.utc >= not_on_or_after
-            return soft ? false : validation_error("Current time is on or after NotOnOrAfter condition")
+            add_validation_error("Current time is on or after NotOnOrAfter condition")
+            return false
           end
         end
 
