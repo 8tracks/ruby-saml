@@ -138,7 +138,7 @@ module Onelogin
           return false
         end
         
-        # return false unless validate_conditions
+        return false unless validate_conditions
       end
 
 
