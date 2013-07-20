@@ -151,6 +151,7 @@ module Onelogin
         
         @schema.validate(@xml).map do |error| 
           add_validation_error(:invalid_structure, "#{error.message}\n\n#{@xml.to_s}")
+          return false
         end
       end
 
