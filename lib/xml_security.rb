@@ -44,97 +44,126 @@ module XMLSecurity
       extract_signed_element_id
     end
 
-    def validate(idp_cert_fingerprint, soft = true)
-      # get cert from response
-      cert_element = REXML::XPath.first(self, "//ds:X509Certificate", { "ds"=>DSIG })
-      raise Onelogin::Saml::ValidationError.new("Certificate element missing in response (ds:X509Certificate)") unless cert_element
-      base64_cert  = cert_element.text
-      cert_text    = Base64.decode64(base64_cert)
-      cert         = OpenSSL::X509::Certificate.new(cert_text)
+    # def validate(idp_cert_fingerprint)
+    #   # get cert from response
+    #   cert_element = REXML::XPath.first(self, "//ds:X509Certificate", { "ds"=>DSIG })
+    #   raise Onelogin::Saml::ValidationError.new("Certificate element missing in response (ds:X509Certificate)") unless cert_element
+    #   base64_cert  = cert_element.text
+    #   cert_text    = Base64.decode64(base64_cert)
+    #   cert         = OpenSSL::X509::Certificate.new(cert_text)
 
-      # check cert matches registered idp cert
-      fingerprint = Digest::SHA1.hexdigest(cert.to_der)
+    #   # check cert matches registered idp cert
+    #   fingerprint = Digest::SHA1.hexdigest(cert.to_der)
 
-      if fingerprint != idp_cert_fingerprint.gsub(/[^a-zA-Z0-9]/,"").downcase
-        return soft ? false : (raise Onelogin::Saml::ValidationError.new("Fingerprint mismatch"))
-      end
+    #   if fingerprint != idp_cert_fingerprint.gsub(/[^a-zA-Z0-9]/,"").downcase
+    #     return soft ? false : (raise Onelogin::Saml::ValidationError.new("Fingerprint mismatch"))
+    #   end
 
-      validate_doc(base64_cert, soft)
+    #   validate_doc(base64_cert, soft)
+    # end
+
+    
+    def nokogiri_document_without_signature
+      return @nokogiri_document_without_signature if @nokogiri_document_without_signature
+
+      nokogiri_document ||= Nokogiri.parse(self.to_s)
+      @noko_sig_element = nokogiri_document.at_xpath('//ds:Signature', 'ds' => DSIG)
+      noko_signed_info_element = @noko_sig_element.at_xpath('./ds:SignedInfo', 'ds' => DSIG)
+      @canonicalized_signature  = noko_signed_info_element.canonicalize(canon_algorithm_id)
+
+      @noko_sig_element.remove
+
+      @nokogiri_document_without_signature = nokogiri_document
     end
 
-    def validate_doc(base64_cert, soft = true)
-      # validate references
+    def canonicalized_signature
+      if @canonicalized_signature
+        @canonicalized_signature
+      else
+        raise "canonicalized_signature is missing" 
+      end
+    end
 
+    def canon_algorithm_id
+      @canon_algorithm_id ||= parse_canon_algorithm_id(REXML::XPath.first(sig_element, '//ds:CanonicalizationMethod', 'ds' => DSIG))
+    end
+
+    def working_copy
+      # create a working copy so we don't modify the original
+      @working_copy ||= REXML::Document.new(self.to_s).root
+    end
+
+    def sig_element
+      # store and remove signature node
+      @sig_element ||= begin
+        element = REXML::XPath.first(working_copy, "//ds:Signature", {"ds"=>DSIG})
+        element.remove
+      end
+    end
+
+    def signed_info_element
+      REXML::XPath.first(sig_element, "//ds:SignedInfo", {"ds"=>DSIG})
+    end
+
+
+
+
+    def validate_digests
       # check for inclusive namespaces
       inclusive_namespaces = extract_inclusive_namespaces
 
-      document = Nokogiri.parse(self.to_s)
+      REXML::XPath.each(sig_element, "//ds:Reference", {"ds"=>DSIG}) do |ref|
+        uri = ref.attributes.get_attribute("URI").value
 
-      # create a working copy so we don't modify the original
-      @working_copy ||= REXML::Document.new(self.to_s).root
+        element_id = uri[1..-1]
+        unless hashed_element = nokogiri_document_without_signature.at_xpath("//*[@ID='#{element_id}']")
+          raise Onelogin::Saml::ValidationError.new("No element with ID #{element_id}")
+        end
 
-      # store and remove signature node
-      @sig_element ||= begin
-        element = REXML::XPath.first(@working_copy, "//ds:Signature", {"ds"=>DSIG})
-        element.remove
-      end
-
-
-      # verify signature
-      signed_info_element     = REXML::XPath.first(@sig_element, "//ds:SignedInfo", {"ds"=>DSIG})
-      noko_sig_element = document.at_xpath('//ds:Signature', 'ds' => DSIG)
-      noko_signed_info_element = noko_sig_element.at_xpath('./ds:SignedInfo', 'ds' => DSIG)
-      canon_algorithm = canon_algorithm REXML::XPath.first(@sig_element, '//ds:CanonicalizationMethod', 'ds' => DSIG)
-      canon_string = noko_signed_info_element.canonicalize(canon_algorithm)
-      noko_sig_element.remove
-
-      # check digests
-      REXML::XPath.each(@sig_element, "//ds:Reference", {"ds"=>DSIG}) do |ref|
-        uri                           = ref.attributes.get_attribute("URI").value
-
-        hashed_element                = document.at_xpath("//*[@ID='#{uri[1..-1]}']")
-        canon_algorithm               = canon_algorithm REXML::XPath.first(ref, '//ds:CanonicalizationMethod', 'ds' => DSIG)
-        canon_hashed_element          = hashed_element.canonicalize(canon_algorithm, inclusive_namespaces)
-
-        digest_algorithm              = algorithm(REXML::XPath.first(ref, "//ds:DigestMethod"))
-
+        canon_hashed_element          = hashed_element.canonicalize(canon_algorithm_id, inclusive_namespaces)
+        digest_algorithm              = parse_digest_algorithm(REXML::XPath.first(ref, "//ds:DigestMethod"))
         hash                          = digest_algorithm.digest(canon_hashed_element)
         digest_value                  = Base64.decode64(REXML::XPath.first(ref, "//ds:DigestValue", {"ds"=>DSIG}).text)
 
-        unless digests_match?(hash, digest_value)
-          return soft ? false : (raise Onelogin::Saml::ValidationError.new("Digest mismatch"))
+        unless hash == digest_value
+          raise Onelogin::Saml::ValidationError.new("Digest mismatch for element #{element_id}")
         end
       end
+      
+      return true
+    end
 
-      base64_signature        = REXML::XPath.first(@sig_element, "//ds:SignatureValue", {"ds"=>DSIG}).text
-      signature               = Base64.decode64(base64_signature)
+
+
+    def validate_signature(base64_cert)
+      base64_signature    = REXML::XPath.first(sig_element, "//ds:SignatureValue", {"ds"=>DSIG}).text
+      signature           = Base64.decode64(base64_signature)
 
       # get certificate object
-      cert_text               = Base64.decode64(base64_cert)
-      cert                    = OpenSSL::X509::Certificate.new(cert_text)
+      cert_text           = Base64.decode64(base64_cert)
+      cert                = OpenSSL::X509::Certificate.new(cert_text)
 
       # signature method
-      signature_algorithm     = algorithm(REXML::XPath.first(signed_info_element, "//ds:SignatureMethod", {"ds"=>DSIG}))
+      signature_algorithm = parse_digest_algorithm(REXML::XPath.first(signed_info_element, "//ds:SignatureMethod", {"ds"=>DSIG}))
 
-      unless cert.public_key.verify(signature_algorithm.new, signature, canon_string)
-        return soft ? false : (raise Onelogin::Saml::ValidationError.new("Key validation error"))
+      unless cert.public_key.verify(signature_algorithm.new, signature, canonicalized_signature)
+        raise Onelogin::Saml::ValidationError.new("Signature mismatch")
       end
 
       return true
     end
 
+
+
     private
 
-    def digests_match?(hash, digest_value)
-      hash == digest_value
-    end
-
+    
     def extract_signed_element_id
       reference_element       = REXML::XPath.first(self, "//ds:Signature/ds:SignedInfo/ds:Reference", {"ds"=>DSIG})
       self.signed_element_id  = reference_element.attribute("URI").value[1..-1] unless reference_element.nil?
     end
 
-    def canon_algorithm(element)
+    def parse_canon_algorithm_id(element)
       algorithm = element.attribute('Algorithm').value if element
       case algorithm
         when "http://www.w3.org/2001/10/xml-exc-c14n#"         then Nokogiri::XML::XML_C14N_EXCLUSIVE_1_0
@@ -144,7 +173,7 @@ module XMLSecurity
       end
     end
 
-    def algorithm(element)
+    def parse_digest_algorithm(element)
       algorithm = element.attribute("Algorithm").value if element
       algorithm = algorithm && algorithm =~ /sha(.*?)$/i && $1.to_i
       case algorithm

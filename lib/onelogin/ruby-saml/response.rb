@@ -34,6 +34,19 @@ module Onelogin
         validate(false)
       end
 
+      def xbox_attributes
+        return @xbox_attributes if @xbox_attributes 
+        attrs = attributes
+
+        @xbox_attributes = {
+          :pxuid     => attrs["http://schemas.microsoft.com/xbox/2011/07/claims/user/pxuid"],
+          :version   => attrs["http://schemas.microsoft.com/xbox/2011/07/claims/title/version"],
+          :age_group => attrs["http://schemas.microsoft.com/xbox/2011/07/claims/user/agegroup"],
+          :gamer_tag => attrs["http://schemas.microsoft.com/xbox/2011/07/claims/user/gamertag"],
+          :tier      => attrs["http://schemas.microsoft.com/xbox/2011/07/claims/user/tier"]
+        }
+      end
+
       # The value of the user identifier as designated by the initialization request response
       def name_id
         @name_id ||= begin
@@ -103,50 +116,62 @@ module Onelogin
 
       private
 
-      def add_validation_error(message)
-        @validation_errors << message
+      def add_validation_error(error_type, error_message)
+        @validation_errors ||= []
+        @validation_errors << [ error_type, error_message ]
       end
 
       def validate
-        return true
+        return false unless validate_structure
+        
+        begin
+          document.validate_digests
+        rescue Onelogin::Saml::ValidationError => ex
+          add_validation_error(:invalid_digests, ex.message)
+          return false
+        end
 
-        # validate_structure      &&
-        validate_response_state &&
-        validate_conditions     &&
-        document.validate(get_fingerprint, true) 
-        # && success?
+        begin
+          document.validate_signature(Base64.encode64(settings.idp_cert))
+        rescue Onelogin::Saml::ValidationError => ex
+          add_validation_error(:invalid_signature, ex.message)
+          return false
+        end
+        
+        # return false unless validate_conditions
       end
 
-      # def validate_structure(soft = true)
-      #   Dir.chdir(File.expand_path(File.join(File.dirname(__FILE__), '..', '..', 'schemas'))) do
-      #     @schema = Nokogiri::XML::Schema(IO.read('saml20protocol_schema.xsd'))
-      #     @xml = Nokogiri::XML(self.document.to_s)
+
+
+      def validate_structure
+        Dir.chdir(File.expand_path(File.join(File.dirname(__FILE__), '..', '..', 'schemas'))) do
+          @schema = Nokogiri::XML::Schema(IO.read('saml20protocol_schema.xsd'))
+          @xml = Nokogiri::XML(self.document.to_s)
+        end
+        
+        @schema.validate(@xml).map do |error| 
+          add_validation_error(:invalid_structure, "#{error.message}\n\n#{@xml.to_s}")
+        end
+      end
+
+      # def validate_response_state
+      #   if response.empty?
+      #     add_validation_error("Blank response")
+      #     return false
       #   end
-      #   if soft
-      #     @schema.validate(@xml).map{ return false }
-      #   else
-      #     @schema.validate(@xml).map{ |error| validation_error("#{error.message}\n\n#{@xml.to_s}") }
+
+      #   if settings.nil?
+      #     add_validation_error("No settings")
+      #     return false
       #   end
+
+      #   if settings.idp_cert_fingerprint.nil? && settings.idp_cert.nil?
+      #     add_validation_error("No fingerprint or certificate on settings")
+      #     return false
+      #   end
+
+      #   true
       # end
-
-      def validate_response_state
-        if response.empty?
-          add_validation_error("Blank response")
-          return false
-        end
-
-        if settings.nil?
-          add_validation_error("No settings on response")
-          return false
-        end
-
-        if settings.idp_cert_fingerprint.nil? && settings.idp_cert.nil?
-          add_validation_error("No fingerprint or certificate on settings")
-          return false
-        end
-
-        true
-      end
 
       def xpath_first_from_signed_assertion(subelt=nil)
         node = REXML::XPath.first(document, "/a:Assertion[@ID='#{document.signed_element_id}']#{subelt}", { "p" => PROTOCOL, "a" => ASSERTION })
@@ -171,14 +196,14 @@ module Onelogin
 
         if (not_before = parse_time(conditions, "NotBefore"))
           if Time.now.utc < not_before
-            add_validation_error("Current time is earlier than NotBefore condition")
+            add_validation_error(:invalid_condition, "Current time is earlier than NotBefore condition")
             return false
           end
         end
 
         if (not_on_or_after = parse_time(conditions, "NotOnOrAfter"))
           if Time.now.utc >= not_on_or_after
-            add_validation_error("Current time is on or after NotOnOrAfter condition")
+            add_validation_error(:invalid_condition, "Current time is on or after NotOnOrAfter condition")
             return false
           end
         end
