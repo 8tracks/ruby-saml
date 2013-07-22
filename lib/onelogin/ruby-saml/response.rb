@@ -121,8 +121,12 @@ module Onelogin
         @validation_errors << [ error_type, error_message ]
       end
 
-      def validate
-        return false unless validate_structure
+      def validate(options={})
+        if !options[:skip_structure]
+          unless validate_structure
+            return false 
+          end
+        end
         
         begin
           document.validate_digests
