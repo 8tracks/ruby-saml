@@ -114,12 +114,7 @@ module Onelogin
         end
       end
 
-      private
 
-      def add_validation_error(error_type, error_message)
-        @validation_errors ||= []
-        @validation_errors << [ error_type, error_message ]
-      end
 
       def validate(options={})
         if !options[:skip_structure]
@@ -143,6 +138,15 @@ module Onelogin
         end
         
         return false unless validate_conditions
+      end
+
+
+      
+      private
+
+      def add_validation_error(error_type, error_message)
+        @validation_errors ||= []
+        @validation_errors << [ error_type, error_message ]
       end
 
 
