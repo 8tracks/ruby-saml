@@ -30,12 +30,16 @@ module Onelogin
         validate
       end
 
+      def clear_validation_errors!
+        @validation_errors.clear
+      end
+
       def validate!
         validate(false)
       end
 
       def xbox_attributes
-        return @xbox_attributes if @xbox_attributes 
+        return @xbox_attributes if @xbox_attributes
         attrs = attributes
 
         @xbox_attributes = {
@@ -92,7 +96,7 @@ module Onelogin
           parse_time(node, "SessionNotOnOrAfter")
         end
       end
-      
+
       # Checks the status of the response for a "Success" code
       def success?
         @status_code ||= begin
@@ -119,10 +123,10 @@ module Onelogin
       def validate(options={})
         if !options[:skip_structure]
           unless validate_structure
-            return false 
+            return false
           end
         end
-        
+
         begin
           document.validate_digests
         rescue Onelogin::Saml::ValidationError => ex
@@ -136,7 +140,7 @@ module Onelogin
           add_validation_error(:invalid_signature, ex.message)
           return false
         end
-        
+
         if validate_conditions
           return true
         else
@@ -145,7 +149,7 @@ module Onelogin
       end
 
 
-      
+
       private
 
       def add_validation_error(error_type, error_message)
@@ -160,8 +164,8 @@ module Onelogin
           @schema = Nokogiri::XML::Schema(IO.read('saml20protocol_schema.xsd'))
           @xml = Nokogiri::XML(self.document.to_s)
         end
-        
-        @schema.validate(@xml).map do |error| 
+
+        @schema.validate(@xml).map do |error|
           add_validation_error(:invalid_structure, "#{error.message}\n\n#{@xml.to_s}")
           return false
         end
